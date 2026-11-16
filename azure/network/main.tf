@@ -7,18 +7,22 @@ variable "tags" {
   }
 }
 module "loadbalancer" {
-    source = "../../microservice/lb"
+    source = "../lb"
   
 }
-resource "azurerm_resource_group" "ecommerce-micro-service" {
-  name     = "rg-ecommerce-microservices-dev"
-  location = "eastus"
+module "resource_gp" {
+  source = "../../azure"
+  
 }
+# resource "azurerm_resource_group" "ecommerce-micro-service" {
+#   name     = "rg-ecommerce-microservices-dev"
+#   location = "eastus"
+# }
 
 resource "azurerm_virtual_network" "ecommerce-vnet" {
   name                = "ecommerce-vnet-eastus"
-  resource_group_name = azurerm_resource_group.ecommerce-micro-service.name
-  location            = azurerm_resource_group.ecommerce-micro-service.location
+  resource_group_name = module.resource_gp.resource_gp_name
+  location            = module.resource_gp.location
   address_space       = ["10.0.0.0/16"]
   tags                = var.tags
 }
@@ -26,36 +30,48 @@ resource "azurerm_virtual_network" "ecommerce-vnet" {
 # Subnets
 resource "azurerm_subnet" "public-sub" {
   name                 = "dev-public-sub"
-  resource_group_name  = azurerm_resource_group.ecommerce-micro-service.name
+  resource_group_name  =module.resource_gp.resource_gp_name
   virtual_network_name = azurerm_virtual_network.ecommerce-vnet.name
   address_prefixes     = ["10.0.1.0/24"]
 }
 
 resource "azurerm_subnet" "private-sub" {
   name                 = "dev-private-sub"
-  resource_group_name  = azurerm_resource_group.ecommerce-micro-service.name
+  resource_group_name  = module.resource_gp.resource_gp_name
   virtual_network_name = azurerm_virtual_network.ecommerce-vnet.name
   address_prefixes     = ["10.0.2.0/24"]
 }
+resource "azurerm_subnet" "redis-sub" {
+  name                 = "dev-redis-sub"
+  resource_group_name  = azurerm_resource_group.ecommerce-micro-service.name
+  virtual_network_name = azurerm_virtual_network.ecommerce-vnet.name
+  address_prefixes     = ["10.0.3.0/24"]
+}
 
 # Network Security Groups
-resource "azurerm_network_security_group" "web-sg" {
+resource "azurerm_network_security_group" "web-sg" {//frontend
   name                = "web-sg"
-  resource_group_name = azurerm_resource_group.ecommerce-micro-service.name
-  location            = azurerm_resource_group.ecommerce-micro-service.location
+  resource_group_name = module.resource_gp.resource_gp_name
+  location            = module.resource_gp.location
 }
 
-resource "azurerm_network_security_group" "payment-sg" {
+resource "azurerm_network_security_group" "payment-sg" {//payment
   name                = "payment-sg"
-  resource_group_name = azurerm_resource_group.ecommerce-micro-service.name
-  location            = azurerm_resource_group.ecommerce-micro-service.location
+  resource_group_name = module.resource_gp.resource_gp_name
+  location            = module.resource_gp.location
 }
 
-resource "azurerm_network_security_group" "backend-sg" {
+resource "azurerm_network_security_group" "backend-sg" {//backend
   name                = "backend-sg"
-  resource_group_name = azurerm_resource_group.ecommerce-micro-service.name
-  location            = azurerm_resource_group.ecommerce-micro-service.location
+  resource_group_name = module.resource_gp.resource_gp_name
+  location            = module.resource_gp.location
 }
+resource "azurerm_network_security_group" "redis-sg" {//redis
+  name                = "redis-sg"
+  resource_group_name = module.resource_gp.resource_gp_name
+  location            = module.resource_gp.location
+}
+
 
 # Security Rules
 resource "azurerm_network_security_rule" "allow-http_from_internet" {
@@ -69,7 +85,7 @@ resource "azurerm_network_security_rule" "allow-http_from_internet" {
   destination_address_prefix  = "*"
   priority                    = 100
   network_security_group_name = azurerm_network_security_group.web-sg.name
-  resource_group_name         = azurerm_resource_group.ecommerce-micro-service.name
+  resource_group_name         = module.resource_gp.resource_gp_name
 }
 
 resource "azurerm_network_security_rule" "allow-loadbalancer_probe" {
@@ -83,9 +99,8 @@ resource "azurerm_network_security_rule" "allow-loadbalancer_probe" {
   destination_address_prefix  = "*"
   priority                    = 110
   network_security_group_name = azurerm_network_security_group.web-sg.name
-  resource_group_name         = azurerm_resource_group.ecommerce-micro-service.name
+  resource_group_name         =module.resource_gp.resource_gp_name
 }
-
 # Private subnet services only allow inbound traffic from the VNet (microservices communication)
 resource "azurerm_network_security_rule" "backend-internal" {
   name                        = "AllowVNetBackend"
@@ -98,7 +113,22 @@ resource "azurerm_network_security_rule" "backend-internal" {
   destination_address_prefix  = "*"
   priority                    = 100
   network_security_group_name = azurerm_network_security_group.backend-sg.name
-  resource_group_name         = azurerm_resource_group.ecommerce-micro-service.name
+  resource_group_name         = module.resource_gp.resource_gp_name
+}
+
+#redis security rule
+resource "azurerm_network_security_rule" "allow-redis" {
+  name                        = "AllowRedisInternal"
+  priority                    = 120
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_range      = "6380" # Standard SSL port for Azure Cache for Redis
+  source_address_prefix       = "10.0.2.0/24"//only backend can reach redis
+  destination_address_prefix  = "*"
+  resource_group_name         = module.resource_gp.resource_gp_name
+  network_security_group_name = azurerm_network_security_group.redis-sg.name
 }
 
 # NSG Subnet Associations (1 NSG per Subnet)
@@ -111,22 +141,28 @@ resource "azurerm_subnet_network_security_group_association" "private-sga" {
   subnet_id                 = azurerm_subnet.private-sub.id
   network_security_group_id = azurerm_network_security_group.backend-sg.id
 }
+#redis subnet association
+resource "azurerm_subnet_network_security_group_association" "redis-sga" {
+  subnet_id                 = azurerm_subnet.redis-sub.id
+  network_security_group_id = azurerm_network_security_group.redis-sg.id
+}
+
 
 # Public IP (Fixed SKU & Allocation for Standard Load Balancer)
 resource "azurerm_public_ip" "public_ip" {
   name                = "frontend-ip"
   allocation_method   = "Static"
   sku                 = "Standard"
-  resource_group_name = azurerm_resource_group.ecommerce-micro-service.name
-  location            = azurerm_resource_group.ecommerce-micro-service.location
+  resource_group_name = module.resource_gp.resource_gp_name
+  location            = module.resource_gp.location
   tags                = var.tags
 }
 
 # Correct NIC mapping to the public subnet
 resource "azurerm_network_interface" "e-commerce-nic" {
   name                = "e-commerce-nic"
-  resource_group_name = azurerm_resource_group.ecommerce-micro-service.name
-  location            = azurerm_resource_group.ecommerce-micro-service.location
+  resource_group_name = module.resource_gp.resource_gp_name
+  location            = module.resource_gp.location
 
   ip_configuration {
     name                          = "internal"
@@ -142,13 +178,13 @@ resource "azurerm_network_interface_backend_address_pool_association" "nic_lb_as
   backend_address_pool_id = module.loadbalancer.backend_address_pool_id
 }
 # Outputs for consumption by other modules
-output "location" {
-  value = azurerm_resource_group.ecommerce-micro-service.location
-}
+# output "location" {
+#   value = azurerm_resource_group.ecommerce-micro-service.location
+# }
 
-output "resource_gp_name" {
-  value = azurerm_resource_group.ecommerce-micro-service.name
-}
+# output "resource_gp_name" {
+#   value = azurerm_resource_group.ecommerce-micro-service.name
+# }
 
 output "public_ip_id" {
   value = azurerm_public_ip.public_ip.id
@@ -163,4 +199,8 @@ output "private_subnet" {
 }
 output "vnet" {
   value= azurerm_virtual_network.ecommerce-vnet 
+}
+output "redis_subnet" {
+  value = azurerm_subnet.redis-sub.id
+  
 }
